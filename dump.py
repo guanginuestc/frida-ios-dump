@@ -22,6 +22,8 @@ from paramiko import SSHClient
 from scp import SCPClient
 from tqdm import tqdm
 import traceback
+import zipfile
+import stat
 
 IS_PY2 = sys.version_info[0] < 3
 if IS_PY2:
@@ -38,7 +40,7 @@ Host = 'localhost'
 Port = 2222
 KeyFileName = None
 
-TEMP_DIR = tempfile.gettempdir()
+TEMP_DIR = "E:/github/frida-ios-dump/temp/" #tempfile.gettempdir()
 PAYLOAD_DIR = 'Payload'
 PAYLOAD_PATH = os.path.join(TEMP_DIR, PAYLOAD_DIR)
 file_dict = {}
@@ -72,28 +74,78 @@ def get_usb_iphone():
     return device
 
 
+# def generate_ipa(path, display_name):
+#     ipa_filename = display_name + '.ipa'
+
+#     print('Generating "{}"'.format(ipa_filename))
+#     try:
+#         app_name = file_dict['app']
+
+#         for key, value in file_dict.items():
+#             from_dir = os.path.join(path, key)
+#             to_dir = os.path.join(path, app_name, value)
+#             if key != 'app':
+#                 shutil.move(from_dir, to_dir)
+
+#         target_dir = './' + PAYLOAD_DIR
+#         zip_args = ('zip', '-qr', os.path.join(os.getcwd(), ipa_filename), target_dir)
+#         subprocess.check_call(zip_args, cwd=TEMP_DIR)
+#         shutil.rmtree(PAYLOAD_PATH)
+#     except Exception as e:
+#         print(e)
+#         finished.set()
+
 def generate_ipa(path, display_name):
     ipa_filename = display_name + '.ipa'
-
     print('Generating "{}"'.format(ipa_filename))
+    
     try:
+        # 获取应用名称（假设file_dict是全局变量）
         app_name = file_dict['app']
-
+        target_tmp_dir = os.path.join(path, app_name)
+        os.makedirs(target_tmp_dir, exist_ok=True)
+        # 移动文件到目标目录
         for key, value in file_dict.items():
+            if key == 'app':  # 跳过app名称条目
+                continue
             from_dir = os.path.join(path, key)
-            to_dir = os.path.join(path, app_name, value)
-            if key != 'app':
-                shutil.move(from_dir, to_dir)
-
-        target_dir = './' + PAYLOAD_DIR
-        zip_args = ('zip', '-qr', os.path.join(os.getcwd(), ipa_filename), target_dir)
-        subprocess.check_call(zip_args, cwd=TEMP_DIR)
-        shutil.rmtree(PAYLOAD_PATH)
+            to_dir = os.path.join(target_tmp_dir, value)
+            os.remove(to_dir)
+            shutil.move(from_dir, to_dir)
+        
+        # 设置路径参数（假设TEMP_DIR、PAYLOAD_DIR是全局变量）
+        target_dir = os.path.join(TEMP_DIR, PAYLOAD_DIR)  # 要压缩的目录
+        output_path = os.path.join(os.getcwd(), ipa_filename)  # IPA输出路径
+        
+        # 使用zipfile压缩目录（替代zip命令行）
+        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files in os.walk(target_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # 计算相对路径以保留目录结构[3,5](@ref)
+                    arcname = os.path.relpath(file_path, os.path.dirname(target_dir))
+                    zipf.write(file_path, arcname)
+        
+        # 清理临时目录
+        shutil.rmtree(os.path.join(TEMP_DIR, PAYLOAD_DIR))
+        print(f"✅ IPA文件已生成: {output_path}")
+    
     except Exception as e:
-        print(e)
-        finished.set()
+        import traceback
+        print(f"❌ 生成IPA时出错: {e}")
+        error_msg = traceback.format_exc()
+        print(f"⛔ 文件访问被拒绝！详细错误：\n{error_msg}")
+        # 假设finished是全局Event对象
+        if 'finished' in globals():
+            finished.set()
+def need_chmod():
+    import platform
+    if platform.system() == "Windows":
+        return False
+    return True
 
 def on_message(message, data):
+    print(f"on message:{message}")
     t = tqdm(unit='B',unit_scale=True,unit_divisor=1024,miniters=1)
     last_sent = [0]
 
@@ -116,13 +168,13 @@ def on_message(message, data):
             scp_from = dump_path
             scp_to = PAYLOAD_PATH + '/'
 
-            with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
+            with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 5) as scp:
                 scp.get(scp_from, scp_to)
 
             chmod_dir = os.path.join(PAYLOAD_PATH, os.path.basename(dump_path))
             chmod_args = ('chmod', '655', chmod_dir)
             try:
-                subprocess.check_call(chmod_args)
+                os.chmod(chmod_dir, stat.S_IWRITE)
             except subprocess.CalledProcessError as err:
                 print(err)
 
@@ -134,16 +186,16 @@ def on_message(message, data):
 
             scp_from = app_path
             scp_to = PAYLOAD_PATH + '/'
-            with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
+            with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 5) as scp:
                 scp.get(scp_from, scp_to, recursive=True)
 
             chmod_dir = os.path.join(PAYLOAD_PATH, os.path.basename(app_path))
             chmod_args = ('chmod', '755', chmod_dir)
             try:
-                subprocess.check_call(chmod_args)
+                os.chmod(chmod_dir, stat.S_IWRITE)
             except subprocess.CalledProcessError as err:
                 print(err)
-
+            
             file_dict['app'] = os.path.basename(app_path)
 
         if 'done' in payload:
@@ -234,6 +286,7 @@ def load_js_file(session, filename):
         source = source + f.read()
     script = session.create_script(source)
     script.on('message', on_message)
+    print("trying to load script!")
     script.load()
 
     return script
@@ -278,7 +331,8 @@ def open_target_app(device, name_or_bundleid):
 
 def start_dump(session, ipa_name):
     print('Dumping {} to {}'.format(display_name, TEMP_DIR))
-
+    shutil.rmtree(TEMP_DIR, ignore_errors=True)
+    create_dir(PAYLOAD_PATH)
     script = load_js_file(session, DUMP_JS)
     script.post('dump')
     finished.wait()
