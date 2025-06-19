@@ -1,1 +1,0 @@
-uv run .\dump.py -u root -P alpine com.tencent.nikke
